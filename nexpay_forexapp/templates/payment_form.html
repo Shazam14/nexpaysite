@@ -1,0 +1,12 @@
+<!-- payment_form.html -->
+<form method="post" action="{% url 'payment:process_payment' %}">
+    {% csrf_token %}
+    <input type="number" name="amount" placeholder="Payment Amount" required>
+    <select name="currency" required>
+        <option value="USD">USD</option>
+        <option value="EUR">EUR</option>
+        <!-- Add other supported currencies as options -->
+    </select>
+    <!-- Add card details fields here for collecting card information -->
+    <input type="submit" value="Pay">
+</form>

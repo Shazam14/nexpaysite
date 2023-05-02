@@ -1,45 +1,57 @@
 from rest_framework import serializers
-from .models import Payment, AnimeChars, PaymentHistory, UserProfile, ExchangeRate
+from .models import Payment, AnimeChars, ExchangeRate
 
+from djoser.serializers import UserCreateSerializer
 from django.contrib.auth.models import User
+from django.contrib.auth import authenticate, get_user_model
+from rest_framework_simplejwt.tokens import RefreshToken
 
+#for custom user model
+User = get_user_model()
 
-class UserProfileSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = UserProfile
-        fields = ('id', 'user',) # Add any additional fields here
-
-
-class UserSerializer(serializers.ModelSerializer):
-    class Meta:
+class UserCreateSerializer(UserCreateSerializer):
+    class Meta(UserCreateSerializer.Meta):
         model = User
-        fields = ('id', 'username', 'password', 'email', 'first_name', 'last_name',)
-        extra_kwargs = {
-            'password': {'write_only': True},
-            'email': {'required': True},
-        }
+        fields = ('id', 'email', 'first_name', 'last_name', 'password')
+
+
+# class UserSerializer(serializers.ModelSerializer):
+#     password = serializers.CharField(write_only=True)
+
+#     class Meta:
+#         model = User
+#         fields = ('id', 'email', 'password', 'first_name', 'last_name')
+#         extra_kwargs = {
+#             'first_name': {'required': True},
+#             'last_name': {'required': True},
+#             'email': {'required': True},
+#         }
+
+    # def create(self, validated_data):
+    #     password = validated_data.pop('password')
+    #     user = User(**validated_data)
+    #     user.set_password(password)
+    #     user.save()
+    #     return user
 
 
 class LoginSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    email = serializers.CharField()
     password = serializers.CharField()
 
     def validate(self, data):
-        """
-        Validate the login data.
-        """
         email = data.get('email')
         password = data.get('password')
 
-        # Perform custom validation here, such as checking if email and password match in the database
-        # ...
+        if email and password:
+            user = authenticate(request=self.context.get('request'), email=email, password=password)
 
-        # Example validation: email and password are required fields
-        if not email:
-            raise serializers.ValidationError('Email is required')
-        if not password:
-            raise serializers.ValidationError('Password is required')
+            if not user:
+                raise serializers.ValidationError('Unable to log in with provided credentials.')
+        else:
+            raise serializers.ValidationError('Must include "email" and "password".')
 
+        data['user'] = user
         return data
 
 class PaymentSerializer(serializers.ModelSerializer):

@@ -2,17 +2,26 @@
 import stripe
 from django.http import HttpResponse
 import requests
-
+import logging
 
 from django.contrib.auth.models import User
 from django.core.mail import send_mail #for mail
 from django.views.decorators.csrf import csrf_exempt
 from django.shortcuts import render, redirect
 
+
+from rest_framework.authentication import SessionAuthentication, BasicAuthentication 
+from rest_framework.permissions import IsAuthenticated, DjangoModelPermissionsOrAnonReadOnly, AllowAny
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework.authtoken.models import Token
+from rest_framework.authtoken.serializers import AuthTokenSerializer
+
+
 from rest_framework.generics import RetrieveAPIView, CreateAPIView
-from rest_framework import permissions, status, viewsets, generics
+from rest_framework import permissions, status, viewsets, generics, authentication
 from nexpay_forexapp.serializers import PaymentSerializer, AnimeCharsSerializer, LoginSerializer, UserSerializer, ExchangeRateSerializer
-from .models import PaymentHistory, AnimeChars, Payment, ExchangeRate
+from .models import AnimeChars, Payment, ExchangeRate
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.decorators import action
@@ -21,7 +30,14 @@ from django.conf import settings
 
 
 from django.contrib.auth import authenticate, login
-from rest_framework.authtoken.models import Token
+
+from knox.views import LoginView as KnoxLoginView
+
+
+from django.contrib.auth import authenticate, login
+from rest_framework import status
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
 
 
 
@@ -32,44 +48,87 @@ stripe.api_key=settings.STRIPE_SECRET_KEY
 
 API_URL="http/locahost:8000"
 
+class UserAPIView(APIView):
+    def post(self, request):
+        serializer = UserSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            return Response({
+                'user_id': user.id,
+                'username': user.username,
+            }, status=status.HTTP_201_CREATED)
+        else:
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-class RegistrationAPIView(CreateAPIView):
+    def get(self, request):
+        users = User.objects.all()
+        serializer = UserSerializer(users, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+class RegistrationAPIView(APIView):
     serializer_class = UserSerializer
 
     def post(self, request):
-        serializer = self.get_serializer(data=request.data)
+        serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
-        token = Token.objects.create(user=user)
+        token, created = Token.objects.get_or_create(user=user)
         response_data = {
             'user_id': user.id,
             'username': user.username,
             'token': token.key,
+            'email': user.email,
         }
         return Response(response_data, status=status.HTTP_201_CREATED)
 
-
-class LoginAPIView(CreateAPIView):
+class LoginAPIView(APIView):
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
+    permission_classes = [IsAuthenticated]
     serializer_class = LoginSerializer
 
-    def post(self, request):
-        username = request.data.get('username')
-        password = request.data.get('password')
-        user = authenticate(request, username=username, password=password)
+    def post(self, request, format=None):
+
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email']
+        password = serializer.validated_data['password']
+        user = authenticate(request=request, email=email, password=password)
         if user is not None:
             login(request, user)
-            token, created = Token.objects.get_or_create(user=user)
-            response_data = {
-                'user_id': user.id,
-                'username': user.username,
-                'token': token.key,
-            }
-            return Response(response_data, status=status.HTTP_200_OK)
-        else:
-            response_data = {
-                'detail': 'Invalid username or password',
-            }
-            return Response(response_data, status=status.HTTP_401_UNAUTHORIZED)
+            return super(LoginAPIView, self).post(request, format=None)
+        return Response({'error': 'Invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
+    
+
+class ListUsers(APIView):
+    """
+    View to list all users in the system.
+
+    * Requires token authentication.
+    * Only admin users are able to access this view.
+    """
+    authentication_classes = [authentication.TokenAuthentication]
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request, format=None):
+        """
+        Return a list of all users.
+        """
+        usernames = [user.username for user in User.objects.all()]
+        return Response(usernames)
+
+class CustomAuthToken(ObtainAuthToken):
+    def post(self, request, *args, **kwargs):
+        serializer = self.serializer_class(data=request.data,
+                                           context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data['user']
+        token, created = Token.objects.get_or_create(user=user)
+        return Response({
+            'token': token.key,
+            'user_id': user.pk,
+            'email': user.email
+        })
+
 
 class AnimeCharsPreview(RetrieveAPIView):
     serializer_class=AnimeCharsSerializer
@@ -90,8 +149,8 @@ class PaymentAPIView(generics.CreateAPIView):
     serializer_class = PaymentSerializer
 
 
-def index(request):
-    return HttpResponse("Hello, world. You're at the foreign exchange payment.")
+    def index(request):
+        return HttpResponse("Hello, world. You're at the foreign exchange payment.")
 
 
 #exchange rate --different approach
@@ -119,52 +178,6 @@ class ExchangeRateViewSet(viewsets.ViewSet):
             return Response(serializer.data, status=200)
         except Exception as e:
             return Response({'error': str(e)}, status=500)
-
-# checking out
-
-
-
-# @csrf_exempt
-# def create_checkout_session(request):
-#     if request.method == 'POST':
-#         # Get the necessary data for creating a Checkout Session from the request
-#         # For example, you can get the price and product information from the request's POST data
-#         animechars_id=self.kwargs["pk"]
-#         print(animechars_id)
-#         price_id = request.POST.get('price_id')
-#         success_url = request.POST.get('success_url')
-#         cancel_url = request.POST.get('cancel_url')
-
-#         # Create a Checkout Session
-#         try:
-# #             animeproduct=AnimeChars.objects.get(id=animechars_id)
-# #             print(animeproduct)
-#             session = stripe.checkout.Session.create(
-#             payment_method_types=['card'],
-#             line_items=[
-#                     {
-#                         # Provide the exact Price ID (for example, pr_1234) of the product you want to sell
-#                         'price_data': {
-#                             'currency':'AUD',
-#                              'unit_amount':int(animeproduct.price) * 100,
-#                              'product_data':{
-#                                  'name':animeproduct.anime_name,
-#                                  'images':[f"{API_URL}/{animeproduct.anime_image}"]
-
-#                              }
-#                         },
-#                         'quantity': 1,
-#                     },
-#                 ],
-#             mode='payment',
-#             success_url=success_url,
-#             cancel_url=cancel_url,
-#         )
-
-#             return Response({'sessionId': session.id})
-#         except Exception as e:
-#             return Response({'msg':'something went wrong while creating stripe session','error':str(e)}, status=500)
-       
     
 class CreateCheckOutSession(APIView):
     def post(self, request, *args, **kwargs):
@@ -244,66 +257,3 @@ def stripe_webhook_view(request):
 
 
 
-
-# import requests
-# from decimal import Decimal
-# from django.http import JsonResponse
-
-# def process_payment(request):
-#     if request.method == 'POST':
-#         amount = Decimal(request.POST.get('amount'))
-#         currency = request.POST.get('currency')
-#         # Make API request to get latest exchange rate
-#         status_code = response.status_code
-#         result = response.text
-
-#         response = requests.request("GET", url, headers=headers, data = payload)
-
-
-#         response = requests.get('https://api.exchangeratesapi.io/latest')
-#         exchange_rate = Decimal(response.json()['rates'][currency])
-#         converted_amount = amount * exchange_rate
-#         # Save payment details to database
-#         payment = Payment(amount=amount, currency=currency, exchange_rate=exchange_rate,
-#                           status='success', converted_amount=converted_amount)
-#         payment.save()
-#         return JsonResponse({'status': 'success', 'converted_amount': str(converted_amount)})
-#     else:
-#         return JsonResponse({'status': 'error', 'message': 'Invalid request'})
-
-
-
-# # views for payment process
-# def process_payment(request):
-#     if request.method == 'POST':
-#         # Get the payment amount and currency from the form
-#         amount = request.POST['amount']
-#         currency = request.POST['currency']
-        
-#         # Create a Stripe payment intent
-#         intent = stripe.PaymentIntent.create(
-#             amount=amount,
-#             currency=currency
-#         )
-        
-#         # Render the payment intent to the template for processing
-#         return render(request, 'payment/process_payment.html', {'client_secret': intent['client_secret']})
-
-# def payment_callback(request):
-#     if request.method == 'POST':
-#         # Get the payment status and transaction details from the payment gateway callback
-#         payment_status = request.POST['status']
-#         transaction_id = request.POST['transaction_id']
-        
-#         # Handle the payment status and update your database accordingly
-#         if payment_status == 'succeeded':
-#             # Payment successful, update the order status in your database
-#             order = Order.objects.get(transaction_id=transaction_id)
-#             order.status = 'completed'
-#             order.save()
-            
-#         # Redirect to a success or failure page based on the payment status
-#         if payment_status == 'succeeded':
-#             return redirect('payment:success')
-#         else:
-#             return redirect('payment:failure')
